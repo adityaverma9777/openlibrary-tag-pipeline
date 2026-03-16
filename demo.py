@@ -254,7 +254,8 @@ def print_timing(result):
     after_agglom = stats.get("clusters_after_agglom_merge", "?")
     before_cat = stats.get("clusters_before_category_merge", "?")
     before_tax = stats.get("clusters_before_taxonomy", "?")
-    absorbed = stats.get("singletons_absorbed", 0)
+    absorbed = stats.get("clusters_absorbed", 0)
+    singletons_left = stats.get("singletons_remaining", 0)
     parents = stats.get("parent_genres_active", 0)
     final = stats.get("clusters_final", "?")
 
@@ -264,13 +265,30 @@ def print_timing(result):
         f"  After centroid merge:    [green]{after_agglom}[/] clusters\n"
         f"  After category merge:    [yellow]{before_cat}[/] clusters\n"
         f"  Before taxonomy merge:   [yellow]{before_tax}[/] clusters\n"
-        f"  Singletons absorbed:     [green]{absorbed}[/]\n"
+        f"  Clusters absorbed:       [green]{absorbed}[/]\n"
+        f"  Singletons remaining:    [yellow]{singletons_left}[/]\n"
         f"  Parent genres active:    [cyan]{parents}[/]\n"
         f"  [bold]Final clusters:        [bold bright_green]{final}[/]",
-        title="🔗 Merge Stats",
+        title="\U0001f517 Merge Stats",
         border_style="bright_magenta",
     ))
+
+    distribution = stats.get("parent_genre_distribution", {})
+    if distribution:
+        dist_lines = []
+        for genre, count in list(distribution.items())[:20]:
+            bar_len = min(int(count / 5), 30)
+            bar = "\u2588" * bar_len
+            dist_lines.append(f"  {genre:<25} [cyan]{count:>4}[/] tags  {bar}")
+        dist_text = "\n".join(dist_lines)
+        console.print(Panel(
+            f"[bold]Parent Genre Distribution[/]\n{dist_text}",
+            title="\U0001f4ca Distribution",
+            border_style="bright_cyan",
+        ))
     console.print()
+
+
 
 
 def print_summary(result, paths: tuple):

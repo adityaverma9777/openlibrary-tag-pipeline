@@ -130,8 +130,10 @@ class TagPipeline:
         result.stats["clusters_after_agglom_merge"] = self.clusterer.stats["clusters_after_merge"]
         result.stats["clusters_before_category_merge"] = clusters_before_cat_merge
         result.stats["clusters_before_taxonomy"] = clusters_before_taxonomy
-        result.stats["singletons_absorbed"] = self.taxonomy.stats["singletons_absorbed"]
+        result.stats["clusters_absorbed"] = self.taxonomy.stats["clusters_absorbed"]
+        result.stats["singletons_remaining"] = self.taxonomy.stats["singletons_remaining"]
         result.stats["parent_genres_active"] = self.taxonomy.stats["parent_genres_active"]
+        result.stats["parent_genre_distribution"] = self.taxonomy.stats["parent_genre_distribution"]
         result.stats["clusters_final"] = len(result.classified_clusters)
         return result
 
