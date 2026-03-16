@@ -96,6 +96,13 @@ class TagPipeline:
         result.classified_clusters = self.classifier.classify_clusters(
             result.clusters
         )
+
+        clusters_before_cat_merge = len(result.classified_clusters)
+
+        result.classified_clusters = self.clusterer.category_merge(
+            result.classified_clusters, result.cleaned_tags, embeddings,
+        )
+
         result.structured_categories = self.classifier.build_structured_output(
             result.classified_clusters
         )
@@ -103,6 +110,10 @@ class TagPipeline:
 
         result.timing["total"] = round(time.time() - total_start, 3)
         result.stats = self._build_stats(result)
+        result.stats["clusters_before_agglom_merge"] = self.clusterer.stats["clusters_before_merge"]
+        result.stats["clusters_after_agglom_merge"] = self.clusterer.stats["clusters_after_merge"]
+        result.stats["clusters_before_category_merge"] = clusters_before_cat_merge
+        result.stats["clusters_final"] = len(result.classified_clusters)
         return result
 
     def _build_stats(self, result: PipelineResult) -> dict:
@@ -115,12 +126,12 @@ class TagPipeline:
             "input_tags": len(result.raw_tags),
             "unique_after_cleaning": len(result.cleaned_tags),
             "duplicates_removed": len(result.raw_tags) - len(result.cleaned_tags),
-            "clusters_formed": len(result.clusters),
+            "clusters_formed": len(result.classified_clusters),
             "largest_cluster": max(
-                (c["size"] for c in result.clusters), default=0
+                (len(c.get("members", [])) for c in result.classified_clusters), default=0
             ),
             "singletons": sum(
-                1 for c in result.clusters if c["size"] == 1
+                1 for c in result.classified_clusters if len(c.get("members", [])) == 1
             ),
             "categories_assigned": category_counts,
         }

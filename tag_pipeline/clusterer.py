@@ -1,5 +1,5 @@
 import numpy as np
-import hdbscan
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
 
 from tag_pipeline.config import PipelineConfig
@@ -8,6 +8,10 @@ from tag_pipeline.config import PipelineConfig
 class TagClusterer:
     def __init__(self, config: PipelineConfig | None = None):
         self.config = config or PipelineConfig()
+        self.stats = {
+            "clusters_before_merge": 0,
+            "clusters_after_merge": 0,
+        }
 
     def cluster(self, tags: list[str], embeddings: np.ndarray) -> list[dict]:
         if len(tags) == 0:
@@ -15,43 +19,115 @@ class TagClusterer:
         if len(tags) == 1:
             return [self._make_cluster(tags, embeddings, [0])]
 
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=self.config.hdbscan_min_cluster_size,
-            min_samples=self.config.hdbscan_min_samples,
-            metric=self.config.hdbscan_metric,
-            cluster_selection_method=self.config.hdbscan_cluster_selection_method,
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = embeddings / norms
+
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            metric="cosine",
+            linkage="average",
+            distance_threshold=self.config.clustering_distance_threshold,
         )
-        labels = clusterer.fit_predict(embeddings)
+        labels = clustering.fit_predict(normed)
 
         label_to_indices: dict[int, list[int]] = {}
-        noise_indices: list[int] = []
-
         for idx, label in enumerate(labels):
-            if label == -1:
-                noise_indices.append(idx)
-            else:
-                label_to_indices.setdefault(label, []).append(idx)
+            label_to_indices.setdefault(label, []).append(idx)
 
         clusters = []
         for indices in label_to_indices.values():
-            clusters.append(self._make_cluster(tags, embeddings, indices))
+            clusters.append(self._make_cluster(tags, normed, indices))
 
-        for idx in noise_indices:
-            merged = self._try_merge_noise(idx, tags, embeddings, clusters)
-            if not merged:
-                clusters.append(self._make_cluster(tags, embeddings, [idx]))
+        self.stats["clusters_before_merge"] = len(clusters)
 
-        clusters = self._post_merge(clusters, embeddings, tags)
+        clusters = self._centroid_merge(clusters, normed, tags)
+
         clusters.sort(key=lambda c: c["size"], reverse=True)
+        self.stats["clusters_after_merge"] = len(clusters)
+
         return clusters
+
+    def category_merge(self, classified_clusters: list[dict], tags: list[str], embeddings: np.ndarray) -> list[dict]:
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = embeddings / norms
+
+        tag_to_idx = {t: i for i, t in enumerate(tags)}
+
+        merged = True
+        while merged:
+            merged = False
+            n = len(classified_clusters)
+            if n <= 1:
+                break
+
+            best_i, best_j = -1, -1
+            best_sim = -1.0
+
+            for a in range(n):
+                for b in range(a + 1, n):
+                    if classified_clusters[a]["category"] != classified_clusters[b]["category"]:
+                        continue
+
+                    rep_a = classified_clusters[a]["cluster_label"]
+                    rep_b = classified_clusters[b]["cluster_label"]
+
+                    idx_a = tag_to_idx.get(rep_a)
+                    idx_b = tag_to_idx.get(rep_b)
+                    if idx_a is None or idx_b is None:
+                        continue
+
+                    sim = float(np.dot(normed[idx_a], normed[idx_b]))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_i, best_j = a, b
+
+            if best_sim >= self.config.category_merge_threshold and best_i >= 0:
+                merged_item = self._merge_classified(
+                    classified_clusters[best_i],
+                    classified_clusters[best_j],
+                    normed, tag_to_idx,
+                )
+                classified_clusters = [
+                    c for k, c in enumerate(classified_clusters) if k not in (best_i, best_j)
+                ]
+                classified_clusters.append(merged_item)
+                merged = True
+
+        classified_clusters.sort(key=lambda c: len(c["members"]), reverse=True)
+        return classified_clusters
+
+    def _merge_classified(self, a: dict, b: dict, normed: np.ndarray, tag_to_idx: dict) -> dict:
+        all_members = sorted(set(a["members"] + b["members"]))
+
+        member_indices = [tag_to_idx[m] for m in all_members if m in tag_to_idx]
+        if member_indices:
+            member_embs = normed[member_indices]
+            centroid = np.mean(member_embs, axis=0)
+            sims = cosine_similarity(member_embs, centroid.reshape(1, -1)).flatten()
+            best_idx = int(np.argmax(sims))
+            representative = all_members[best_idx]
+        else:
+            representative = a["cluster_label"]
+
+        avg_conf = (a["confidence"] * len(a["members"]) + b["confidence"] * len(b["members"])) / len(all_members)
+
+        return {
+            "cluster_label": representative,
+            "members": all_members,
+            "category": a["category"],
+            "confidence": round(avg_conf, 4),
+            "method": a["method"],
+        }
 
     def _make_cluster(
         self, tags: list[str], embeddings: np.ndarray, indices: list[int]
     ) -> dict:
         members = [tags[i] for i in indices]
-        member_embeddings = embeddings[indices]
-        centroid = np.mean(member_embeddings, axis=0)
-        representative = self._pick_representative(members, member_embeddings, centroid)
+        member_embs = embeddings[indices]
+        centroid = np.mean(member_embs, axis=0)
+        representative = self._pick_representative(members, member_embs, centroid)
 
         return {
             "representative": representative,
@@ -72,43 +148,7 @@ class TagClusterer:
         best_idx = int(np.argmax(similarities))
         return members[best_idx]
 
-    def _try_merge_noise(
-        self,
-        noise_idx: int,
-        tags: list[str],
-        embeddings: np.ndarray,
-        existing_clusters: list[dict],
-    ) -> bool:
-        if not existing_clusters:
-            return False
-
-        noise_vec = embeddings[noise_idx].reshape(1, -1)
-        best_sim = -1.0
-        best_cluster_idx = -1
-
-        for ci, cluster in enumerate(existing_clusters):
-            centroid = cluster["centroid"].reshape(1, -1)
-            sim = float(cosine_similarity(noise_vec, centroid)[0, 0])
-            if sim > best_sim:
-                best_sim = sim
-                best_cluster_idx = ci
-
-        if best_sim >= self.config.merge_threshold:
-            cluster = existing_clusters[best_cluster_idx]
-            cluster["members"].append(tags[noise_idx])
-            cluster["members"].sort()
-            cluster["size"] += 1
-            cluster["_indices"].append(noise_idx)
-            member_embeddings = embeddings[cluster["_indices"]]
-            cluster["centroid"] = np.mean(member_embeddings, axis=0)
-            cluster["representative"] = self._pick_representative(
-                cluster["members"], member_embeddings, cluster["centroid"]
-            )
-            return True
-
-        return False
-
-    def _post_merge(
+    def _centroid_merge(
         self, clusters: list[dict], embeddings: np.ndarray, tags: list[str]
     ) -> list[dict]:
         if len(clusters) <= 1:
@@ -120,7 +160,7 @@ class TagClusterer:
             centroids = np.array([c["centroid"] for c in clusters])
             sim_matrix = cosine_similarity(centroids)
 
-            i, j = -1, -1
+            best_i, best_j = -1, -1
             best_score = -1.0
             n = len(clusters)
 
@@ -128,12 +168,12 @@ class TagClusterer:
                 for b in range(a + 1, n):
                     if sim_matrix[a, b] > best_score:
                         best_score = sim_matrix[a, b]
-                        i, j = a, b
+                        best_i, best_j = a, b
 
-            if best_score >= self.config.merge_threshold:
-                merged_indices = clusters[i]["_indices"] + clusters[j]["_indices"]
+            if best_score >= self.config.cluster_merge_threshold:
+                merged_indices = clusters[best_i]["_indices"] + clusters[best_j]["_indices"]
                 new_cluster = self._make_cluster(tags, embeddings, merged_indices)
-                clusters = [c for k, c in enumerate(clusters) if k not in (i, j)]
+                clusters = [c for k, c in enumerate(clusters) if k not in (best_i, best_j)]
                 clusters.append(new_cluster)
                 merged = True
 

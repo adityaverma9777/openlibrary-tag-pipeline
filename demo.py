@@ -222,6 +222,22 @@ def print_timing(result):
             title="💾 Cache",
             border_style="bright_yellow",
         ))
+
+    stats = result.stats
+    before_agglom = stats.get("clusters_before_agglom_merge", "?")
+    after_agglom = stats.get("clusters_after_agglom_merge", "?")
+    before_cat = stats.get("clusters_before_category_merge", "?")
+    final = stats.get("clusters_final", "?")
+
+    console.print(Panel(
+        f"[bold]Cluster Merge Pipeline[/]\n"
+        f"  After agglomerative:     [cyan]{before_agglom}[/] clusters\n"
+        f"  After centroid merge:    [green]{after_agglom}[/] clusters\n"
+        f"  After classification:    [yellow]{before_cat}[/] clusters\n"
+        f"  After category merge:    [bold bright_green]{final}[/] clusters",
+        title="🔗 Merge Stats",
+        border_style="bright_magenta",
+    ))
     console.print()
 
 
@@ -229,13 +245,14 @@ def print_summary(result, paths: tuple):
     cat_counts = result.stats.get("categories_assigned", {})
     cat_line = ", ".join(f"{k}: {v}" for k, v in cat_counts.items())
     total_time = result.timing.get("total", 0)
+    final_clusters = result.stats.get("clusters_final", result.stats.get("clusters_formed", 0))
 
     console.print(
         Panel(
             f"[bold]Pipeline Complete[/]\n"
             f"  {result.stats['input_tags']} raw tags → "
             f"{result.stats['unique_after_cleaning']} unique → "
-            f"{result.stats['clusters_formed']} clusters\n"
+            f"{final_clusters} clusters\n"
             f"  Categories: {cat_line}\n"
             f"  Time: {total_time:.2f}s\n\n"
             f"  [dim]Output saved:[/]\n"

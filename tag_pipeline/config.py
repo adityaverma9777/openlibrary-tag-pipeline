@@ -20,12 +20,10 @@ class PipelineConfig:
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_batch_size: int = 64
 
-    hdbscan_min_cluster_size: int = 2
-    hdbscan_min_samples: int = 1
-    hdbscan_metric: str = "euclidean"
-    hdbscan_cluster_selection_method: str = "eom"
-
-    merge_threshold: float = 0.80
+    clustering_distance_threshold: float = 0.30
+    cluster_merge_threshold: float = 0.70
+    category_merge_threshold: float = 0.60
+    min_cluster_size: int = 1
 
     faiss_top_k: int = 10
     faiss_enabled: bool = True
