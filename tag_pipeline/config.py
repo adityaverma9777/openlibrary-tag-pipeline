@@ -25,6 +25,9 @@ class PipelineConfig:
     category_merge_threshold: float = 0.60
     min_cluster_size: int = 1
 
+    enable_hierarchical_merge: bool = True
+    parent_genre_similarity_threshold: float = 0.55
+
     faiss_top_k: int = 10
     faiss_enabled: bool = True
 

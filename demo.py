@@ -33,11 +33,15 @@ def save_structured_output(result):
     with open(structured_path, "w") as f:
         json.dump(result.structured_categories, f, indent=2)
 
+    hierarchy_path = OUTPUT_DIR / "hierarchy.json"
+    with open(hierarchy_path, "w") as f:
+        json.dump(result.hierarchy, f, indent=2)
+
     full_path = OUTPUT_DIR / "pipeline_result.json"
     with open(full_path, "w") as f:
         json.dump(result.to_dict(), f, indent=2)
 
-    return classified_path, structured_path, full_path
+    return classified_path, structured_path, hierarchy_path, full_path
 
 
 def print_header():
@@ -194,6 +198,27 @@ def print_structured_output(result):
     console.print()
 
 
+def print_hierarchy(result):
+    if not result.hierarchy:
+        return
+
+    console.print("[bold yellow]Stage 5:[/] Hierarchical Taxonomy\n")
+
+    colors = [
+        "bright_cyan", "bright_green", "bright_yellow", "bright_magenta",
+        "bright_red", "bright_blue",
+    ]
+
+    for i, (parent, children) in enumerate(result.hierarchy.items()):
+        color = colors[i % len(colors)]
+        child_count = len(children)
+        console.print(f"  [{color}][bold]{parent}[/bold][/] [dim]({child_count} subclusters)[/]")
+        for child in children:
+            console.print(f"    [dim]└─[/] {child}")
+
+    console.print()
+
+
 def print_timing(result):
     timing = result.timing
     if not timing:
@@ -205,6 +230,7 @@ def print_timing(result):
         f"  Embedding:        [cyan]{timing.get('embedding', 0):.3f}s[/]\n"
         f"  Clustering:       [cyan]{timing.get('clustering', 0):.3f}s[/]\n"
         f"  Classification:   [cyan]{timing.get('classification', 0):.3f}s[/]\n"
+        f"  Taxonomy merge:   [cyan]{timing.get('taxonomy_merge', 0):.3f}s[/]\n"
         f"  [bold]Total:            [bright_green]{timing.get('total', 0):.3f}s[/]",
         title="⏱ Timing",
         border_style="bright_blue",
@@ -227,14 +253,20 @@ def print_timing(result):
     before_agglom = stats.get("clusters_before_agglom_merge", "?")
     after_agglom = stats.get("clusters_after_agglom_merge", "?")
     before_cat = stats.get("clusters_before_category_merge", "?")
+    before_tax = stats.get("clusters_before_taxonomy", "?")
+    absorbed = stats.get("singletons_absorbed", 0)
+    parents = stats.get("parent_genres_active", 0)
     final = stats.get("clusters_final", "?")
 
     console.print(Panel(
         f"[bold]Cluster Merge Pipeline[/]\n"
         f"  After agglomerative:     [cyan]{before_agglom}[/] clusters\n"
         f"  After centroid merge:    [green]{after_agglom}[/] clusters\n"
-        f"  After classification:    [yellow]{before_cat}[/] clusters\n"
-        f"  After category merge:    [bold bright_green]{final}[/] clusters",
+        f"  After category merge:    [yellow]{before_cat}[/] clusters\n"
+        f"  Before taxonomy merge:   [yellow]{before_tax}[/] clusters\n"
+        f"  Singletons absorbed:     [green]{absorbed}[/]\n"
+        f"  Parent genres active:    [cyan]{parents}[/]\n"
+        f"  [bold]Final clusters:        [bold bright_green]{final}[/]",
         title="🔗 Merge Stats",
         border_style="bright_magenta",
     ))
@@ -258,7 +290,8 @@ def print_summary(result, paths: tuple):
             f"  [dim]Output saved:[/]\n"
             f"  [dim]  {paths[0]}[/]\n"
             f"  [dim]  {paths[1]}[/]\n"
-            f"  [dim]  {paths[2]}[/]",
+            f"  [dim]  {paths[2]}[/]\n"
+            f"  [dim]  {paths[3]}[/]",
             border_style="bright_green",
             title="Summary",
         )
@@ -280,6 +313,7 @@ def main():
     print_similar_pairs(result)
     print_clusters(result)
     print_classification(result)
+    print_hierarchy(result)
     print_structured_output(result)
     print_timing(result)
 

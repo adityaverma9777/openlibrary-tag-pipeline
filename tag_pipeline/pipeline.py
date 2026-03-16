@@ -8,6 +8,7 @@ from tag_pipeline.tag_cleaner import TagCleaner
 from tag_pipeline.embedder import TagEmbedder
 from tag_pipeline.clusterer import TagClusterer
 from tag_pipeline.classifier import CategoryClassifier
+from tag_pipeline.taxonomy_merger import TaxonomyMerger
 
 
 @dataclass
@@ -18,6 +19,7 @@ class PipelineResult:
     clusters: list[dict] = field(default_factory=list)
     classified_clusters: list[dict] = field(default_factory=list)
     structured_categories: dict = field(default_factory=dict)
+    hierarchy: dict = field(default_factory=dict)
     similar_pairs: list[tuple[str, str, float]] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     timing: dict = field(default_factory=dict)
@@ -38,6 +40,7 @@ class PipelineResult:
             ],
             "classified_clusters": self.classified_clusters,
             "structured_categories": self.structured_categories,
+            "hierarchy": self.hierarchy,
             "top_similar_pairs": [
                 {"tag_a": a, "tag_b": b, "similarity": round(s, 4)}
                 for a, b, s in self.similar_pairs[:20]
@@ -52,6 +55,7 @@ class TagPipeline:
         self.embedder = TagEmbedder(self.config)
         self.clusterer = TagClusterer(self.config)
         self.classifier = CategoryClassifier(self.config)
+        self.taxonomy = TaxonomyMerger(self.config, self.embedder)
 
     def process(self, tags: list[str]) -> PipelineResult:
         total_start = time.time()
@@ -102,17 +106,32 @@ class TagPipeline:
         result.classified_clusters = self.clusterer.category_merge(
             result.classified_clusters, result.cleaned_tags, embeddings,
         )
+        result.timing["classification"] = round(time.time() - t0, 3)
+
+        t0 = time.time()
+        clusters_before_taxonomy = len(result.classified_clusters)
+
+        result.classified_clusters = self.taxonomy.merge(
+            result.classified_clusters, result.cleaned_tags, embeddings,
+        )
+
+        result.hierarchy = self.taxonomy.build_hierarchy(
+            result.classified_clusters, result.cleaned_tags, embeddings,
+        )
 
         result.structured_categories = self.classifier.build_structured_output(
             result.classified_clusters
         )
-        result.timing["classification"] = round(time.time() - t0, 3)
+        result.timing["taxonomy_merge"] = round(time.time() - t0, 3)
 
         result.timing["total"] = round(time.time() - total_start, 3)
         result.stats = self._build_stats(result)
         result.stats["clusters_before_agglom_merge"] = self.clusterer.stats["clusters_before_merge"]
         result.stats["clusters_after_agglom_merge"] = self.clusterer.stats["clusters_after_merge"]
         result.stats["clusters_before_category_merge"] = clusters_before_cat_merge
+        result.stats["clusters_before_taxonomy"] = clusters_before_taxonomy
+        result.stats["singletons_absorbed"] = self.taxonomy.stats["singletons_absorbed"]
+        result.stats["parent_genres_active"] = self.taxonomy.stats["parent_genres_active"]
         result.stats["clusters_final"] = len(result.classified_clusters)
         return result
 
