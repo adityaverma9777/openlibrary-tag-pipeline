@@ -1,5 +1,4 @@
 import json
-import time
 from pathlib import Path
 
 from rich.console import Console
@@ -53,242 +52,120 @@ def print_header():
     console.print()
 
 
-def print_raw_tags(tags: list[str]):
-    console.print("[bold yellow]Stage 0:[/] Raw Input Tags")
-    console.print(f"  Total: [bold]{len(tags)}[/] tags\n")
-
-    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold magenta")
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Raw Tag", style="white")
-
-    for i, tag in enumerate(tags, 1):
-        table.add_row(str(i), tag)
-
-    console.print(table)
-    console.print()
-
-
-def print_cleaning_results(result):
-    console.print("[bold yellow]Stage 1:[/] Tag Normalization")
-    console.print(f"  Input:  [bold]{len(result.raw_tags)}[/] tags")
-    console.print(f"  Output: [bold]{len(result.cleaned_tags)}[/] unique normalized tags")
-    console.print(
-        f"  Removed: [bold red]{result.stats['duplicates_removed']}[/] duplicates\n"
+def print_pipeline_summary(result):
+    stats = result.stats
+    input_count = stats.get("input_tags", len(result.raw_tags))
+    normalized_count = stats.get("unique_after_cleaning", len(result.cleaned_tags))
+    before_taxonomy = stats.get(
+        "clusters_before_taxonomy",
+        stats.get("clusters_before_category_merge", len(result.classified_clusters)),
     )
+    after_taxonomy = stats.get("clusters_final", len(result.classified_clusters))
+    singletons = stats.get("singletons_remaining", stats.get("singletons", 0))
+
+    console.print("[bold yellow]Pipeline Summary[/]")
+    console.print(f"Input tags: {input_count}")
+    console.print(f"Normalized tags: {normalized_count}")
+    console.print(f"Clusters before taxonomy merge: {before_taxonomy}")
+    console.print(f"Clusters after taxonomy merge: {after_taxonomy}")
+    console.print(f"Singleton clusters: {singletons}\n")
+
+
+def print_before_after_taxonomy(result):
+    stats = result.stats
+
+    clusters_before = stats.get(
+        "clusters_before_taxonomy",
+        stats.get("clusters_before_category_merge", 0),
+    )
+    clusters_after = stats.get("clusters_final", len(result.classified_clusters))
+
+    singletons_before = stats.get(
+        "singletons_before_taxonomy",
+        stats.get("singletons", 0),
+    )
+    singletons_after = stats.get(
+        "singletons_remaining",
+        stats.get("singletons", 0),
+    )
+
+    cluster_reduction = 0.0
+    if clusters_before > 0:
+        cluster_reduction = ((clusters_before - clusters_after) / clusters_before) * 100
+
+    singleton_reduction = 0.0
+    if singletons_before > 0:
+        singleton_reduction = ((singletons_before - singletons_after) / singletons_before) * 100
+
+    console.print("[bold yellow]Before vs After Taxonomy Merge[/]")
+    console.print("Before Taxonomy Merge:")
+    console.print(f"Clusters: {clusters_before}")
+    console.print(f"Singleton clusters: {singletons_before}\n")
+
+    console.print("After Taxonomy Merge:")
+    console.print(f"Clusters: {clusters_after}")
+    console.print(f"Singleton clusters: {singletons_after}\n")
+
+    console.print("Cluster Reduction:")
+    console.print(f"{clusters_before} -> {clusters_after} ({cluster_reduction:.1f}% reduction)\n")
+
+    console.print("Singleton Reduction:")
+    console.print(f"{singletons_before} -> {singletons_after} ({singleton_reduction:.1f}% reduction)\n")
+
+
+def print_normalization_examples(result, limit: int = 10):
+    console.print(f"[bold yellow]Normalization Examples (first {limit})[/]")
 
     table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold magenta")
     table.add_column("Normalized Tag", style="bold green")
     table.add_column("Original Variants", style="dim white")
 
-    for tag in result.cleaned_tags:
+    for tag in result.cleaned_tags[:limit]:
         originals = result.raw_to_clean_map.get(tag, [])
-        variants = ", ".join(f'"{o}"' for o in originals if o.lower().strip() != tag)
+        variants = ", ".join(dict.fromkeys(originals))
         table.add_row(tag, variants if variants else "—")
 
     console.print(table)
     console.print()
 
 
-def print_similar_pairs(result):
-    if not result.similar_pairs:
+def print_parent_genre_distribution(result):
+    distribution = result.stats.get("parent_genre_distribution", {})
+    if not distribution:
         return
 
-    console.print("[bold yellow]Stage 2:[/] Semantic Similarity (top pairs)")
-
-    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold magenta")
-    table.add_column("Tag A", style="cyan")
-    table.add_column("Tag B", style="cyan")
-    table.add_column("Similarity", style="bold white", justify="right")
-
-    for a, b, score in result.similar_pairs[:15]:
-        bar_len = int(score * 20)
-        bar = "█" * bar_len + "░" * (20 - bar_len)
-        table.add_row(a, b, f"{score:.3f} {bar}")
-
-    console.print(table)
+    console.print("[bold yellow]Parent Genre Distribution[/]")
+    sorted_items = sorted(distribution.items(), key=lambda item: item[1], reverse=True)
+    for genre, count in sorted_items:
+        label = " ".join(part.capitalize() for part in genre.split())
+        console.print(f"{label} ({count} tags)")
     console.print()
 
 
-def print_clusters(result):
-    console.print("[bold yellow]Stage 3:[/] Tag Clusters")
-    console.print(f"  Clusters formed: [bold]{result.stats['clusters_formed']}[/]")
-    console.print(f"  Largest cluster: [bold]{result.stats['largest_cluster']}[/] members")
-    console.print(f"  Singletons:      [bold]{result.stats['singletons']}[/]\n")
-
-    colors = [
-        "bright_cyan", "bright_green", "bright_yellow", "bright_magenta",
-        "bright_red", "bright_blue", "bright_white", "cyan", "green",
-        "yellow", "magenta", "red", "blue",
-    ]
-
-    for i, cluster in enumerate(result.clusters):
-        color = colors[i % len(colors)]
-        rep = cluster["representative"]
-        members = cluster["members"]
-
-        member_text = ", ".join(
-            f"[bold]{m}[/]" if m == rep else m for m in members
-        )
-
-        console.print(
-            f"  [{color}]Cluster {i + 1}[/] "
-            f"[dim]({cluster['size']} tags)[/]  "
-            f"→  {member_text}"
-        )
-
-    console.print()
-
-
-def print_classification(result):
+def print_top_largest_clusters(result, top_n: int = 10, max_members_display: int = 12):
     if not result.classified_clusters:
         return
 
-    console.print("[bold yellow]Stage 4:[/] Semantic Category Classification\n")
+    console.print(f"[bold yellow]Top {top_n} Largest Clusters[/]")
+    clusters = sorted(
+        result.classified_clusters,
+        key=lambda c: len(c.get("members", [])),
+        reverse=True,
+    )
 
-    category_styles = {
-        "genre": "bold bright_cyan",
-        "theme": "bold bright_green",
-        "setting": "bold bright_yellow",
-        "mood": "bold bright_magenta",
-        "audience": "bold bright_red",
-    }
+    for cluster in clusters[:top_n]:
+        label = cluster.get("cluster_label", "unknown")
+        members = sorted(cluster.get("members", []))
+        console.print(f"[bold cyan]{label}[/bold cyan]")
 
-    table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold magenta")
-    table.add_column("Cluster Label", style="white", min_width=20)
-    table.add_column("Category", min_width=10)
-    table.add_column("Confidence", justify="right", min_width=10)
-    table.add_column("Method", style="dim", min_width=8)
-    table.add_column("Members", style="dim white")
+        shown_members = members[:max_members_display]
+        for member in shown_members:
+            console.print(member)
 
-    for item in result.classified_clusters:
-        cat = item["category"]
-        style = category_styles.get(cat, "white")
-        conf = item["confidence"]
-        bar_len = int(conf * 15)
-        bar = "█" * bar_len + "░" * (15 - bar_len)
-
-        members_str = ", ".join(item["members"][:5])
-        if len(item["members"]) > 5:
-            members_str += f" (+{len(item['members']) - 5})"
-
-        table.add_row(
-            item["cluster_label"],
-            f"[{style}]{cat}[/]",
-            f"{conf:.3f} {bar}",
-            item["method"],
-            members_str,
-        )
-
-    console.print(table)
-    console.print()
-
-
-def print_structured_output(result):
-    if not result.structured_categories:
-        return
-
-    console.print("[bold yellow]Structured Output:[/]\n")
-
-    display = {}
-    for category, entries in result.structured_categories.items():
-        display[category] = [e["label"] for e in entries]
-
-    formatted = json.dumps(display, indent=2)
-    console.print(Panel(formatted, title="Structured Categories", border_style="bright_green"))
-    console.print()
-
-
-def print_hierarchy(result):
-    if not result.hierarchy:
-        return
-
-    console.print("[bold yellow]Stage 5:[/] Hierarchical Taxonomy\n")
-
-    colors = [
-        "bright_cyan", "bright_green", "bright_yellow", "bright_magenta",
-        "bright_red", "bright_blue",
-    ]
-
-    for i, (parent, children) in enumerate(result.hierarchy.items()):
-        color = colors[i % len(colors)]
-        child_count = len(children)
-        console.print(f"  [{color}][bold]{parent}[/bold][/] [dim]({child_count} subclusters)[/]")
-        for child in children:
-            console.print(f"    [dim]└─[/] {child}")
-
-    console.print()
-
-
-def print_timing(result):
-    timing = result.timing
-    if not timing:
-        return
-
-    console.print(Panel(
-        f"[bold]Pipeline Runtime Summary[/]\n"
-        f"  Normalization:    [cyan]{timing.get('normalization', 0):.3f}s[/]\n"
-        f"  Embedding:        [cyan]{timing.get('embedding', 0):.3f}s[/]\n"
-        f"  Clustering:       [cyan]{timing.get('clustering', 0):.3f}s[/]\n"
-        f"  Classification:   [cyan]{timing.get('classification', 0):.3f}s[/]\n"
-        f"  Taxonomy merge:   [cyan]{timing.get('taxonomy_merge', 0):.3f}s[/]\n"
-        f"  [bold]Total:            [bright_green]{timing.get('total', 0):.3f}s[/]",
-        title="⏱ Timing",
-        border_style="bright_blue",
-    ))
-
-    cache = result.cache_stats
-    if cache:
-        hit_rate = cache.get("hit_rate", 0)
-        console.print(Panel(
-            f"[bold]Embedding Cache[/]\n"
-            f"  Total processed:  [cyan]{cache.get('total_processed', 0)}[/]\n"
-            f"  Cache hits:       [green]{cache.get('cache_hits', 0)}[/]\n"
-            f"  New computed:     [yellow]{cache.get('new_computed', 0)}[/]\n"
-            f"  Hit rate:         [bold bright_green]{hit_rate:.1f}%[/]",
-            title="💾 Cache",
-            border_style="bright_yellow",
-        ))
-
-    stats = result.stats
-    before_agglom = stats.get("clusters_before_agglom_merge", "?")
-    after_agglom = stats.get("clusters_after_agglom_merge", "?")
-    before_cat = stats.get("clusters_before_category_merge", "?")
-    before_tax = stats.get("clusters_before_taxonomy", "?")
-    absorbed = stats.get("clusters_absorbed", 0)
-    singletons_left = stats.get("singletons_remaining", 0)
-    parents = stats.get("parent_genres_active", 0)
-    final = stats.get("clusters_final", "?")
-
-    console.print(Panel(
-        f"[bold]Cluster Merge Pipeline[/]\n"
-        f"  After agglomerative:     [cyan]{before_agglom}[/] clusters\n"
-        f"  After centroid merge:    [green]{after_agglom}[/] clusters\n"
-        f"  After category merge:    [yellow]{before_cat}[/] clusters\n"
-        f"  Before taxonomy merge:   [yellow]{before_tax}[/] clusters\n"
-        f"  Clusters absorbed:       [green]{absorbed}[/]\n"
-        f"  Singletons remaining:    [yellow]{singletons_left}[/]\n"
-        f"  Parent genres active:    [cyan]{parents}[/]\n"
-        f"  [bold]Final clusters:        [bold bright_green]{final}[/]",
-        title="\U0001f517 Merge Stats",
-        border_style="bright_magenta",
-    ))
-
-    distribution = stats.get("parent_genre_distribution", {})
-    if distribution:
-        dist_lines = []
-        for genre, count in list(distribution.items())[:20]:
-            bar_len = min(int(count / 5), 30)
-            bar = "\u2588" * bar_len
-            dist_lines.append(f"  {genre:<25} [cyan]{count:>4}[/] tags  {bar}")
-        dist_text = "\n".join(dist_lines)
-        console.print(Panel(
-            f"[bold]Parent Genre Distribution[/]\n{dist_text}",
-            title="\U0001f4ca Distribution",
-            border_style="bright_cyan",
-        ))
-    console.print()
-
-
+        remaining = len(members) - len(shown_members)
+        if remaining > 0:
+            console.print(f"[dim]+{remaining} more[/]")
+        console.print()
 
 
 def print_summary(result, paths: tuple):
@@ -320,20 +197,18 @@ def main():
     print_header()
 
     tags = load_sample_tags()
-    print_raw_tags(tags)
+    console.print(f"[bold yellow]Loaded input tags:[/] {len(tags)}\n")
 
     console.print("[dim]Initializing pipeline (loading models)...[/]\n")
     pipeline = TagPipeline()
 
     result = pipeline.process(tags)
 
-    print_cleaning_results(result)
-    print_similar_pairs(result)
-    print_clusters(result)
-    print_classification(result)
-    print_hierarchy(result)
-    print_structured_output(result)
-    print_timing(result)
+    print_pipeline_summary(result)
+    print_before_after_taxonomy(result)
+    print_normalization_examples(result, limit=10)
+    print_parent_genre_distribution(result)
+    print_top_largest_clusters(result, top_n=10, max_members_display=12)
 
     paths = save_structured_output(result)
     print_summary(result, paths)

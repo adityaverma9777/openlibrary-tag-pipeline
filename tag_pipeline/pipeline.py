@@ -110,6 +110,9 @@ class TagPipeline:
 
         t0 = time.time()
         clusters_before_taxonomy = len(result.classified_clusters)
+        singletons_before_taxonomy = sum(
+            1 for c in result.classified_clusters if len(c.get("members", [])) == 1
+        )
 
         result.classified_clusters = self.taxonomy.merge(
             result.classified_clusters, result.cleaned_tags, embeddings,
@@ -130,6 +133,7 @@ class TagPipeline:
         result.stats["clusters_after_agglom_merge"] = self.clusterer.stats["clusters_after_merge"]
         result.stats["clusters_before_category_merge"] = clusters_before_cat_merge
         result.stats["clusters_before_taxonomy"] = clusters_before_taxonomy
+        result.stats["singletons_before_taxonomy"] = singletons_before_taxonomy
         result.stats["clusters_absorbed"] = self.taxonomy.stats["clusters_absorbed"]
         result.stats["singletons_remaining"] = self.taxonomy.stats["singletons_remaining"]
         result.stats["parent_genres_active"] = self.taxonomy.stats["parent_genres_active"]
