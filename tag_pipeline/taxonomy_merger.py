@@ -343,6 +343,7 @@ class TaxonomyMerger:
             "rejected_domain_mismatch": 0,
             "allowed_despite_domain_mismatch": 0,
             "allowed_with_domain_score_below_one": 0,
+            "fallback_small_clusters_absorbed": 0,
         }
 
     def _build_parent_aliases(self) -> dict[str, set[str]]:
@@ -560,6 +561,39 @@ class TaxonomyMerger:
         best_parent_idx = int(np.argmax(max_by_parent))
         return best_parent_idx, float(max_by_parent[best_parent_idx])
 
+    def _score_parent_candidates(
+        self,
+        cluster: dict,
+        member_embs: np.ndarray,
+        rep_emb: np.ndarray,
+        parent_embs: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        rep_scores = cosine_similarity(rep_emb.reshape(1, -1), parent_embs).flatten()
+        member_avg_scores = np.mean(cosine_similarity(member_embs, parent_embs), axis=0)
+        embedding_scores = (0.5 * rep_scores) + (0.5 * member_avg_scores)
+
+        keyword_scores = np.array([
+            self._keyword_score(cluster, parent_name) for parent_name in self._parent_list
+        ], dtype=np.float32)
+
+        domain_scores = np.array([
+            self._domain_compatibility_score(cluster, parent_name) for parent_name in self._parent_list
+        ], dtype=np.float32)
+
+        hybrid_scores = (
+            self.config.parent_embedding_weight * embedding_scores
+            + self.config.parent_keyword_weight * keyword_scores
+            + self.config.parent_domain_weight * domain_scores
+        )
+
+        domain_penalty_mask = domain_scores < self.config.parent_domain_soft_mismatch_threshold
+        if np.any(domain_penalty_mask):
+            hybrid_scores = hybrid_scores + (
+                domain_penalty_mask.astype(np.float32) * self.config.parent_domain_mismatch_penalty
+            )
+
+        return embedding_scores, keyword_scores, domain_scores, hybrid_scores
+
     def _evaluate_assignment(
         self,
         cluster: dict,
@@ -577,26 +611,12 @@ class TaxonomyMerger:
 
         similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
 
-        rep_scores = cosine_similarity(rep_emb.reshape(1, -1), parent_embs).flatten()
-        member_avg_scores = np.mean(cosine_similarity(member_embs, parent_embs), axis=0)
-        embedding_scores = (0.5 * rep_scores) + (0.5 * member_avg_scores)
-        keyword_scores = np.array([
-            self._keyword_score(cluster, parent_name) for parent_name in self._parent_list
-        ], dtype=np.float32)
-        domain_scores = np.array([
-            self._domain_compatibility_score(cluster, parent_name) for parent_name in self._parent_list
-        ], dtype=np.float32)
-        hybrid_scores = (
-            self.config.parent_embedding_weight * embedding_scores
-            + self.config.parent_keyword_weight * keyword_scores
-            + self.config.parent_domain_weight * domain_scores
+        embedding_scores, keyword_scores, domain_scores, hybrid_scores = self._score_parent_candidates(
+            cluster,
+            member_embs,
+            rep_emb,
+            parent_embs,
         )
-
-        domain_penalty_mask = domain_scores < self.config.parent_domain_soft_mismatch_threshold
-        if np.any(domain_penalty_mask):
-            hybrid_scores = hybrid_scores + (
-                domain_penalty_mask.astype(np.float32) * self.config.parent_domain_mismatch_penalty
-            )
 
         best_idx, best_score, second_score = self._best_and_second_score(hybrid_scores)
         if best_idx < 0:
@@ -643,6 +663,79 @@ class TaxonomyMerger:
             "final_score": best_score,
         }
 
+    def _fallback_absorb_small_clusters(
+        self,
+        unmatched: list[dict],
+        parent_clusters: dict[str, dict],
+        normed: np.ndarray,
+        tag_to_idx: dict[str, int],
+        parent_embs: np.ndarray,
+    ) -> list[dict]:
+        if not unmatched:
+            return []
+
+        remaining = []
+        for cluster in unmatched:
+            members = cluster.get("members", [])
+            cluster_size = len(members)
+            if cluster_size == 0 or cluster_size > self.config.singleton_fallback_max_cluster_size:
+                remaining.append(cluster)
+                continue
+
+            member_indices = self._get_member_indices(cluster, tag_to_idx)
+            if not member_indices:
+                remaining.append(cluster)
+                continue
+
+            member_embs = normed[member_indices]
+            rep_label = cluster.get("cluster_label", "")
+            rep_idx = tag_to_idx.get(rep_label)
+            rep_emb = normed[rep_idx] if rep_idx is not None else np.mean(member_embs, axis=0)
+
+            embedding_scores, keyword_scores, domain_scores, hybrid_scores = self._score_parent_candidates(
+                cluster,
+                member_embs,
+                rep_emb,
+                parent_embs,
+            )
+
+            best_idx, best_score, _ = self._best_and_second_score(hybrid_scores)
+            if best_idx < 0:
+                remaining.append(cluster)
+                continue
+
+            best_parent = self._parent_list[best_idx]
+            best_embedding = float(embedding_scores[best_idx])
+            best_keyword = float(keyword_scores[best_idx])
+            best_domain = float(domain_scores[best_idx])
+
+            should_absorb = (
+                best_score >= self.config.singleton_fallback_merge_threshold
+                and best_domain >= self.config.singleton_fallback_min_domain_score
+                and (
+                    best_keyword >= self.config.singleton_fallback_keyword_threshold
+                    or best_embedding >= self.config.singleton_fallback_min_embedding_score
+                )
+            )
+
+            if not should_absorb:
+                remaining.append(cluster)
+                continue
+
+            if best_parent not in parent_clusters:
+                parent_clusters[best_parent] = self._init_parent(best_parent, cluster)
+            else:
+                self._absorb_into_parent(parent_clusters[best_parent], cluster)
+
+            self.stats["clusters_absorbed"] += 1
+            self.stats["fallback_small_clusters_absorbed"] += 1
+
+            if best_domain < 1.0:
+                self.stats["allowed_despite_domain_mismatch"] += 1
+                self.stats["allowed_with_domain_score_below_one"] += 1
+
+        return remaining
+
     def _assign_parent(
         self, cluster: dict, tags: list[str], normed: np.ndarray, tag_to_idx: dict
     ) -> str | None:
@@ -676,6 +769,7 @@ class TaxonomyMerger:
         self.stats["rejected_domain_mismatch"] = 0
         self.stats["allowed_despite_domain_mismatch"] = 0
         self.stats["allowed_with_domain_score_below_one"] = 0
+        self.stats["fallback_small_clusters_absorbed"] = 0
 
         self.stats["clusters_before_taxonomy"] = len(classified_clusters)
 
@@ -739,6 +833,14 @@ class TaxonomyMerger:
                     self.stats["clusters_absorbed"] += 1
                 else:
                     unmatched.append(cluster)
+
+        unmatched = self._fallback_absorb_small_clusters(
+            unmatched,
+            parent_clusters,
+            normed,
+            tag_to_idx,
+            parent_embs,
+        )
 
         result = list(parent_clusters.values()) + unmatched
         result.sort(key=lambda c: len(c.get("members", [])), reverse=True)

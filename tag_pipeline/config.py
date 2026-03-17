@@ -52,6 +52,11 @@ class PipelineConfig:
     parent_min_relaxed_consistency_threshold: float = 0.20
     taxonomy_max_cluster_size_to_absorb: int = 12
     parent_large_cluster_merge_threshold: float = 0.52
+    singleton_fallback_max_cluster_size: int = 3
+    singleton_fallback_merge_threshold: float = 0.36
+    singleton_fallback_keyword_threshold: float = 0.20
+    singleton_fallback_min_domain_score: float = 0.40
+    singleton_fallback_min_embedding_score: float = 0.38
 
     faiss_top_k: int = 10
     faiss_enabled: bool = True
