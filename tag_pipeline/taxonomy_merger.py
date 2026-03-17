@@ -151,6 +151,15 @@ LITERARY_CROSS_DOMAIN_ALLOWED = {
     ("nature", "animals"),
 }
 
+LITERARY_WEAK_DOMAIN_ALLOWED = {
+    ("science", "history"),
+    ("history", "science"),
+    ("fiction", "history"),
+    ("history", "fiction"),
+    ("religion", "politics"),
+    ("politics", "religion"),
+}
+
 SUBGENRE_MAP = {
     "grimdark": "fantasy",
     "portal fantasy": "fantasy",
@@ -332,6 +341,7 @@ class TaxonomyMerger:
             "rejected_low_consistency": 0,
             "rejected_domain_mismatch": 0,
             "allowed_despite_domain_mismatch": 0,
+            "allowed_with_domain_score_below_one": 0,
         }
 
     def _build_parent_aliases(self) -> dict[str, set[str]]:
@@ -341,7 +351,10 @@ class TaxonomyMerger:
                 aliases[parent].add(child)
 
         aliases.setdefault("science fiction", {"science fiction"}).update(
-            {"scifi", "sci fi", "sci-fi", "sf"}
+            {
+                "scifi", "sci fi", "sci-fi", "sf", "cyberpunk", "steampunk",
+                "space opera", "robotics", "artificial intelligence", "ai",
+            }
         )
         aliases.setdefault("romance", {"romance"}).update({"romantic", "rom-com", "romcom"})
         aliases.setdefault("thriller", {"thriller"}).update({"suspense", "techno-thriller"})
@@ -460,28 +473,16 @@ class TaxonomyMerger:
 
         return detected
 
-    def _is_category_compatible(self, cluster: dict, parent_name: str) -> bool:
-        category = str(cluster.get("category", "")).lower()
-
-        if parent_name in FICTION_PARENTS:
-            return category == "genre"
-
-        if parent_name in {"children", "young adult"}:
-            return category in {"audience", "genre"}
-
-        return category in {"theme", "setting", "genre"}
+    def _canonical_parent_domain(self, parent_name: str) -> str:
+        if parent_name in FICTION_PARENTS or parent_name == "science fiction":
+            return "fiction"
+        return PARENT_DOMAIN_MAP.get(parent_name, "other")
 
     def _domain_compatibility_score(self, cluster: dict, parent_name: str) -> float:
-        parent_domain = PARENT_DOMAIN_MAP.get(parent_name)
+        parent_domain = self._canonical_parent_domain(parent_name)
         cluster_domains = self._extract_cluster_domains(cluster)
         if parent_domain is None or not cluster_domains:
-            return 0.7
-
-        if parent_domain in cluster_domains:
-            return 1.0
-
-        if parent_domain in {"fantasy", "science fiction", "horror", "romance", "mystery", "thriller", "crime"}:
-            parent_domain = "fiction"
+            return 0.4
 
         if parent_domain in cluster_domains:
             return 1.0
@@ -489,20 +490,19 @@ class TaxonomyMerger:
         for d in cluster_domains:
             if (parent_domain, d) in LITERARY_CROSS_DOMAIN_ALLOWED:
                 return 0.75
+            if (parent_domain, d) in LITERARY_WEAK_DOMAIN_ALLOWED:
+                return 0.4
 
         incompatible = INCOMPATIBLE_DOMAINS.get(parent_domain, set())
         if cluster_domains.intersection(incompatible):
-            return 0.15
+            return 0.2
 
         strong_domains = {"animals", "sports", "religion", "politics", "history", "science"}
         strong_hits = cluster_domains.intersection(strong_domains)
         if strong_hits and parent_domain in strong_domains and parent_domain not in strong_hits:
-            return 0.25
+            return 0.2
 
-        if parent_domain == "religion" and "abstract" in cluster_domains:
-            return 0.75
-
-        return 0.5
+        return 0.2
 
     def _best_and_second_score(self, scores: np.ndarray) -> tuple[int, float, float]:
         if scores.size == 0:
@@ -564,9 +564,11 @@ class TaxonomyMerger:
     ) -> tuple[str | None, str | None, dict]:
         clear_parent = self._detect_clear_genre_parent(cluster)
         if clear_parent:
-            if not self._is_category_compatible(cluster, clear_parent):
-                return None, "domain_mismatch", {}
-            return clear_parent, None, {"domain_soft_mismatch": False}
+            domain_score = self._domain_compatibility_score(cluster, clear_parent)
+            return clear_parent, None, {
+                "domain_soft_mismatch": domain_score < 1.0,
+                "domain_score": domain_score,
+            }
 
         similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
 
@@ -596,9 +598,6 @@ class TaxonomyMerger:
         margin = best_score - second_score
         parent_name = self._parent_list[best_idx]
 
-        if not self._is_category_compatible(cluster, parent_name):
-            return None, "domain_mismatch", {}
-
         parent_rep_sim = float(rep_scores[best_idx])
         strong_keyword = float(keyword_scores[best_idx]) >= self.config.parent_keyword_strong_match_threshold
         domain_score = float(domain_scores[best_idx])
@@ -617,48 +616,23 @@ class TaxonomyMerger:
         if very_low_confidence_triplet:
             return None, "low_confidence", {}
 
-        strict_conf_ok = best_score >= similarity_threshold and margin >= margin_threshold
-        if not strict_conf_ok:
-            fallback_similarity = max(
-                0.0,
-                similarity_threshold - self.config.parent_fallback_similarity_delta,
-            )
-            fallback_margin = max(
-                0.0,
-                margin_threshold - self.config.parent_fallback_margin_delta,
-            )
-            if self.config.taxonomy_strict_mode:
-                fallback_similarity = max(
-                    0.0,
-                    fallback_similarity - self.config.strict_fallback_similarity_delta,
-                )
-                fallback_margin = max(
-                    0.0,
-                    fallback_margin - self.config.strict_fallback_margin_delta,
-                )
-
-            fallback_ok = (
-                (strong_keyword or strong_member_for_best)
-                and best_score >= fallback_similarity
-                and margin >= fallback_margin
-            )
-            if not fallback_ok:
-                return None, "low_confidence", {}
+        final_threshold = self.config.global_merge_threshold
+        if best_score < final_threshold:
+            return None, "low_confidence", {}
 
         member_scores = cosine_similarity(member_embs, parent_embs[best_idx].reshape(1, -1)).flatten()
         avg_member_score = float(np.mean(member_scores))
-        required_consistency = consistency_threshold
-        if strong_keyword or strong_member_for_best:
-            required_consistency = max(
-                self.config.parent_min_relaxed_consistency_threshold,
-                consistency_threshold - self.config.parent_consistency_relax_delta,
-            )
+        required_consistency = max(
+            self.config.parent_min_relaxed_consistency_threshold,
+            consistency_threshold - self.config.parent_consistency_relax_delta,
+        ) if (strong_keyword or strong_member_for_best) else consistency_threshold
 
-        if avg_member_score < required_consistency:
+        if avg_member_score < required_consistency and best_score < (final_threshold + 0.10):
             return None, "low_consistency", {}
 
         return parent_name, None, {
-            "domain_soft_mismatch": domain_score < self.config.parent_domain_soft_mismatch_threshold,
+            "domain_soft_mismatch": domain_score < 1.0,
+            "domain_score": domain_score,
         }
 
     def _assign_parent(
@@ -693,6 +667,7 @@ class TaxonomyMerger:
         self.stats["rejected_low_consistency"] = 0
         self.stats["rejected_domain_mismatch"] = 0
         self.stats["allowed_despite_domain_mismatch"] = 0
+        self.stats["allowed_with_domain_score_below_one"] = 0
 
         self.stats["clusters_before_taxonomy"] = len(classified_clusters)
 
@@ -737,6 +712,7 @@ class TaxonomyMerger:
 
             if details.get("domain_soft_mismatch"):
                 self.stats["allowed_despite_domain_mismatch"] += 1
+                self.stats["allowed_with_domain_score_below_one"] += 1
 
             if parent_name not in parent_clusters:
                 parent_clusters[parent_name] = self._init_parent(parent_name, cluster)

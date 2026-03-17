@@ -36,6 +36,7 @@ class PipelineConfig:
     parent_embedding_weight: float = 0.50
     parent_keyword_weight: float = 0.30
     parent_domain_weight: float = 0.20
+    global_merge_threshold: float = 0.45
     parent_domain_soft_mismatch_threshold: float = 0.30
     parent_domain_mismatch_penalty: float = -0.10
     parent_very_low_similarity_threshold: float = 0.22
