@@ -65,6 +65,7 @@ def print_pipeline_summary(result):
     rejected_low_conf = stats.get("rejected_low_confidence", 0)
     rejected_low_consistency = stats.get("rejected_low_consistency", 0)
     rejected_domain_mismatch = stats.get("rejected_domain_mismatch", 0)
+    allowed_despite_domain_mismatch = stats.get("allowed_despite_domain_mismatch", 0)
 
     console.print("[bold yellow]Pipeline Summary[/]")
     console.print(f"Input tags: {input_count}")
@@ -75,6 +76,9 @@ def print_pipeline_summary(result):
     console.print(f"Rejected merges (low confidence): {rejected_low_conf}")
     console.print(f"Rejected merges (low consistency): {rejected_low_consistency}")
     console.print(f"Rejected merges (domain mismatch): {rejected_domain_mismatch}\\n")
+    console.print(
+        f"Merges allowed despite domain mismatch: {allowed_despite_domain_mismatch}\\n"
+    )
 
 
 def print_before_after_taxonomy(result):

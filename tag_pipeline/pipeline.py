@@ -141,6 +141,7 @@ class TagPipeline:
         result.stats["rejected_low_confidence"] = self.taxonomy.stats["rejected_low_confidence"]
         result.stats["rejected_low_consistency"] = self.taxonomy.stats["rejected_low_consistency"]
         result.stats["rejected_domain_mismatch"] = self.taxonomy.stats["rejected_domain_mismatch"]
+        result.stats["allowed_despite_domain_mismatch"] = self.taxonomy.stats["allowed_despite_domain_mismatch"]
         result.stats["clusters_final"] = len(result.classified_clusters)
         return result
 

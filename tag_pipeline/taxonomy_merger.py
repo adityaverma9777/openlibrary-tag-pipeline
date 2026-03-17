@@ -141,6 +141,16 @@ INCOMPATIBLE_DOMAINS = {
     "politics": {"animals", "sports", "religion"},
 }
 
+LITERARY_CROSS_DOMAIN_ALLOWED = {
+    ("science", "fiction"),
+    ("politics", "history"),
+    ("history", "politics"),
+    ("religion", "abstract"),
+    ("religion", "history"),
+    ("animals", "nature"),
+    ("nature", "animals"),
+}
+
 SUBGENRE_MAP = {
     "grimdark": "fantasy",
     "portal fantasy": "fantasy",
@@ -321,6 +331,7 @@ class TaxonomyMerger:
             "rejected_low_confidence": 0,
             "rejected_low_consistency": 0,
             "rejected_domain_mismatch": 0,
+            "allowed_despite_domain_mismatch": 0,
         }
 
     def _build_parent_aliases(self) -> dict[str, set[str]]:
@@ -460,25 +471,38 @@ class TaxonomyMerger:
 
         return category in {"theme", "setting", "genre"}
 
-    def _is_domain_compatible(self, cluster: dict, parent_name: str) -> bool:
+    def _domain_compatibility_score(self, cluster: dict, parent_name: str) -> float:
         parent_domain = PARENT_DOMAIN_MAP.get(parent_name)
         cluster_domains = self._extract_cluster_domains(cluster)
         if parent_domain is None or not cluster_domains:
-            return True
+            return 0.7
+
+        if parent_domain in cluster_domains:
+            return 1.0
+
+        if parent_domain in {"fantasy", "science fiction", "horror", "romance", "mystery", "thriller", "crime"}:
+            parent_domain = "fiction"
+
+        if parent_domain in cluster_domains:
+            return 1.0
+
+        for d in cluster_domains:
+            if (parent_domain, d) in LITERARY_CROSS_DOMAIN_ALLOWED:
+                return 0.75
 
         incompatible = INCOMPATIBLE_DOMAINS.get(parent_domain, set())
         if cluster_domains.intersection(incompatible):
-            return False
+            return 0.15
 
         strong_domains = {"animals", "sports", "religion", "politics", "history", "science"}
         strong_hits = cluster_domains.intersection(strong_domains)
         if strong_hits and parent_domain in strong_domains and parent_domain not in strong_hits:
-            return False
+            return 0.25
 
         if parent_domain == "religion" and "abstract" in cluster_domains:
-            return False
+            return 0.75
 
-        return True
+        return 0.5
 
     def _best_and_second_score(self, scores: np.ndarray) -> tuple[int, float, float]:
         if scores.size == 0:
@@ -537,14 +561,12 @@ class TaxonomyMerger:
         member_embs: np.ndarray,
         rep_emb: np.ndarray,
         parent_embs: np.ndarray,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, dict]:
         clear_parent = self._detect_clear_genre_parent(cluster)
         if clear_parent:
             if not self._is_category_compatible(cluster, clear_parent):
-                return None, "domain_mismatch"
-            if not self._is_domain_compatible(cluster, clear_parent):
-                return None, "domain_mismatch"
-            return clear_parent, None
+                return None, "domain_mismatch", {}
+            return clear_parent, None, {"domain_soft_mismatch": False}
 
         similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
 
@@ -552,31 +574,48 @@ class TaxonomyMerger:
         keyword_scores = np.array([
             self._keyword_score(cluster, parent_name) for parent_name in self._parent_list
         ], dtype=np.float32)
+        domain_scores = np.array([
+            self._domain_compatibility_score(cluster, parent_name) for parent_name in self._parent_list
+        ], dtype=np.float32)
         hybrid_scores = (
             self.config.parent_embedding_weight * rep_scores
             + self.config.parent_keyword_weight * keyword_scores
+            + self.config.parent_domain_weight * domain_scores
         )
+
+        domain_penalty_mask = domain_scores < self.config.parent_domain_soft_mismatch_threshold
+        if np.any(domain_penalty_mask):
+            hybrid_scores = hybrid_scores + (
+                domain_penalty_mask.astype(np.float32) * self.config.parent_domain_mismatch_penalty
+            )
 
         best_idx, best_score, second_score = self._best_and_second_score(hybrid_scores)
         if best_idx < 0:
-            return None, "low_confidence"
+            return None, "low_confidence", {}
 
         margin = best_score - second_score
         parent_name = self._parent_list[best_idx]
 
         if not self._is_category_compatible(cluster, parent_name):
-            return None, "domain_mismatch"
-        if not self._is_domain_compatible(cluster, parent_name):
-            return None, "domain_mismatch"
+            return None, "domain_mismatch", {}
 
         parent_rep_sim = float(rep_scores[best_idx])
         strong_keyword = float(keyword_scores[best_idx]) >= self.config.parent_keyword_strong_match_threshold
+        domain_score = float(domain_scores[best_idx])
 
         strong_parent_idx, strong_member_sim = self._strong_member_match(member_embs, parent_embs)
         strong_member_for_best = (
             strong_parent_idx == best_idx
             and strong_member_sim >= self.config.parent_member_strong_match_threshold
         )
+
+        very_low_confidence_triplet = (
+            parent_rep_sim < self.config.parent_very_low_similarity_threshold
+            and float(keyword_scores[best_idx]) < self.config.parent_no_keyword_threshold
+            and domain_score < self.config.parent_extremely_low_domain_threshold
+        )
+        if very_low_confidence_triplet:
+            return None, "low_confidence", {}
 
         strict_conf_ok = best_score >= similarity_threshold and margin >= margin_threshold
         if not strict_conf_ok:
@@ -604,14 +643,23 @@ class TaxonomyMerger:
                 and margin >= fallback_margin
             )
             if not fallback_ok:
-                return None, "low_confidence"
+                return None, "low_confidence", {}
 
         member_scores = cosine_similarity(member_embs, parent_embs[best_idx].reshape(1, -1)).flatten()
         avg_member_score = float(np.mean(member_scores))
-        if avg_member_score < consistency_threshold:
-            return None, "low_consistency"
+        required_consistency = consistency_threshold
+        if strong_keyword or strong_member_for_best:
+            required_consistency = max(
+                self.config.parent_min_relaxed_consistency_threshold,
+                consistency_threshold - self.config.parent_consistency_relax_delta,
+            )
 
-        return parent_name, None
+        if avg_member_score < required_consistency:
+            return None, "low_consistency", {}
+
+        return parent_name, None, {
+            "domain_soft_mismatch": domain_score < self.config.parent_domain_soft_mismatch_threshold,
+        }
 
     def _assign_parent(
         self, cluster: dict, tags: list[str], normed: np.ndarray, tag_to_idx: dict
@@ -644,6 +692,7 @@ class TaxonomyMerger:
         self.stats["rejected_low_confidence"] = 0
         self.stats["rejected_low_consistency"] = 0
         self.stats["rejected_domain_mismatch"] = 0
+        self.stats["allowed_despite_domain_mismatch"] = 0
 
         self.stats["clusters_before_taxonomy"] = len(classified_clusters)
 
@@ -669,7 +718,7 @@ class TaxonomyMerger:
             rep_idx = tag_to_idx.get(rep_label)
             rep_emb = normed[rep_idx] if rep_idx is not None else np.mean(member_embs, axis=0)
 
-            parent_name, reject_reason = self._evaluate_assignment(
+            parent_name, reject_reason, details = self._evaluate_assignment(
                 cluster,
                 member_embs,
                 rep_emb,
@@ -685,6 +734,9 @@ class TaxonomyMerger:
                     self.stats["rejected_domain_mismatch"] += 1
                 unmatched.append(cluster)
                 continue
+
+            if details.get("domain_soft_mismatch"):
+                self.stats["allowed_despite_domain_mismatch"] += 1
 
             if parent_name not in parent_clusters:
                 parent_clusters[parent_name] = self._init_parent(parent_name, cluster)
@@ -744,7 +796,7 @@ class TaxonomyMerger:
             rep_idx = tag_to_idx.get(rep)
             rep_emb = normed[rep_idx] if rep_idx is not None else np.mean(member_embs, axis=0)
 
-            parent_name, _ = self._evaluate_assignment(
+            parent_name, _, _ = self._evaluate_assignment(
                 cluster,
                 member_embs,
                 rep_emb,

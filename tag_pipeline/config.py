@@ -33,14 +33,22 @@ class PipelineConfig:
     strict_parent_genre_similarity_threshold: float = 0.48
     strict_parent_assignment_margin_threshold: float = 0.07
     strict_parent_semantic_consistency_threshold: float = 0.38
-    parent_embedding_weight: float = 0.60
-    parent_keyword_weight: float = 0.40
+    parent_embedding_weight: float = 0.50
+    parent_keyword_weight: float = 0.30
+    parent_domain_weight: float = 0.20
+    parent_domain_soft_mismatch_threshold: float = 0.30
+    parent_domain_mismatch_penalty: float = -0.10
+    parent_very_low_similarity_threshold: float = 0.22
+    parent_no_keyword_threshold: float = 0.15
+    parent_extremely_low_domain_threshold: float = 0.12
     parent_keyword_strong_match_threshold: float = 0.70
     parent_member_strong_match_threshold: float = 0.58
     parent_fallback_similarity_delta: float = 0.04
     parent_fallback_margin_delta: float = 0.03
     strict_fallback_similarity_delta: float = 0.02
     strict_fallback_margin_delta: float = 0.02
+    parent_consistency_relax_delta: float = 0.10
+    parent_min_relaxed_consistency_threshold: float = 0.20
     taxonomy_max_cluster_size_to_absorb: int = 5
 
     faiss_top_k: int = 10
