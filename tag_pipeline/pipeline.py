@@ -138,6 +138,9 @@ class TagPipeline:
         result.stats["singletons_remaining"] = self.taxonomy.stats["singletons_remaining"]
         result.stats["parent_genres_active"] = self.taxonomy.stats["parent_genres_active"]
         result.stats["parent_genre_distribution"] = self.taxonomy.stats["parent_genre_distribution"]
+        result.stats["rejected_low_confidence"] = self.taxonomy.stats["rejected_low_confidence"]
+        result.stats["rejected_low_consistency"] = self.taxonomy.stats["rejected_low_consistency"]
+        result.stats["rejected_domain_mismatch"] = self.taxonomy.stats["rejected_domain_mismatch"]
         result.stats["clusters_final"] = len(result.classified_clusters)
         return result
 

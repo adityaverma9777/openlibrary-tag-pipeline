@@ -63,6 +63,84 @@ PARENT_GENRES = [
     "spirituality",
 ]
 
+FICTION_PARENTS = {
+    "fantasy",
+    "science fiction",
+    "horror",
+    "romance",
+    "mystery",
+    "thriller",
+    "crime",
+    "humor",
+    "drama",
+    "poetry",
+    "adventure",
+    "western",
+}
+
+PARENT_DOMAIN_MAP = {
+    "animals": "animals",
+    "nature": "nature",
+    "sports": "sports",
+    "religion": "religion",
+    "spirituality": "religion",
+    "politics": "politics",
+    "history": "history",
+    "science": "science",
+    "technology": "science",
+    "medicine": "science",
+    "engineering": "science",
+    "mathematics": "science",
+    "education": "abstract",
+    "psychology": "abstract",
+    "philosophy": "abstract",
+    "sociology": "abstract",
+    "economics": "abstract",
+    "law": "abstract",
+    "business": "abstract",
+    "children": "audience",
+    "young adult": "audience",
+}
+
+DOMAIN_KEYWORDS = {
+    "animals": [
+        "animal", "wildlife", "zoology", "dog", "cat", "bird", "wolf",
+        "bear", "horse", "pet", "dinosaurs", "marine biology",
+    ],
+    "sports": [
+        "sport", "football", "basketball", "baseball", "hockey", "tennis",
+        "rugby", "cricket", "swimming", "gym", "fitness", "boxing",
+        "martial", "athlete", "competition",
+    ],
+    "religion": [
+        "religion", "spiritual", "faith", "church", "mosque", "temple",
+        "theology", "scripture", "sacred", "ritual", "god", "divine",
+    ],
+    "politics": [
+        "politic", "election", "government", "policy", "state", "democracy",
+        "diplomacy", "geopolitic", "ideology",
+    ],
+    "history": [
+        "history", "historical", "archaeolog", "ancient", "civilization",
+        "artifact", "medieval", "bronze age", "iron age",
+    ],
+    "science": [
+        "science", "technology", "biology", "physics", "chemistry", "genetics",
+        "engineering", "medicine", "ai", "machine learning",
+    ],
+    "abstract": [
+        "identity", "freedom", "justice", "morality", "ethics", "power",
+        "love", "existential", "human nature", "philosophy",
+    ],
+}
+
+INCOMPATIBLE_DOMAINS = {
+    "animals": {"sports", "politics", "religion", "abstract"},
+    "sports": {"animals", "politics", "religion", "history", "abstract"},
+    "religion": {"sports", "animals", "politics", "abstract"},
+    "politics": {"animals", "sports", "religion"},
+}
+
 SUBGENRE_MAP = {
     "grimdark": "fantasy",
     "portal fantasy": "fantasy",
@@ -230,6 +308,9 @@ class TaxonomyMerger:
             "singletons_remaining": 0,
             "parent_genres_active": 0,
             "parent_genre_distribution": {},
+            "rejected_low_confidence": 0,
+            "rejected_low_consistency": 0,
+            "rejected_domain_mismatch": 0,
         }
 
     def _get_parent_embeddings(self) -> np.ndarray:
@@ -291,6 +372,133 @@ class TaxonomyMerger:
 
         return None
 
+    def _get_member_indices(self, cluster: dict, tag_to_idx: dict) -> list[int]:
+        member_indices = []
+        for m in cluster.get("members", []):
+            idx = tag_to_idx.get(m)
+            if idx is not None:
+                member_indices.append(idx)
+
+        if member_indices:
+            return member_indices
+
+        rep_idx = tag_to_idx.get(cluster.get("cluster_label", ""))
+        if rep_idx is not None:
+            return [rep_idx]
+        return []
+
+    def _confidence_thresholds(self) -> tuple[float, float, float]:
+        similarity_threshold = self.config.parent_genre_similarity_threshold
+        margin_threshold = self.config.parent_assignment_margin_threshold
+        consistency_threshold = self.config.parent_semantic_consistency_threshold
+
+        if self.config.taxonomy_strict_mode:
+            similarity_threshold = max(
+                similarity_threshold,
+                self.config.strict_parent_genre_similarity_threshold,
+            )
+            margin_threshold = max(
+                margin_threshold,
+                self.config.strict_parent_assignment_margin_threshold,
+            )
+            consistency_threshold = max(
+                consistency_threshold,
+                self.config.strict_parent_semantic_consistency_threshold,
+            )
+
+        return similarity_threshold, margin_threshold, consistency_threshold
+
+    def _extract_cluster_domains(self, cluster: dict) -> set[str]:
+        detected = set()
+        category = str(cluster.get("category", "")).lower()
+
+        if category == "genre":
+            detected.add("fiction")
+        elif category == "audience":
+            detected.add("audience")
+
+        text = " ".join([cluster.get("cluster_label", "")] + cluster.get("members", [])).lower()
+        for domain, keywords in DOMAIN_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in text:
+                    detected.add(domain)
+                    break
+
+        return detected
+
+    def _is_category_compatible(self, cluster: dict, parent_name: str) -> bool:
+        category = str(cluster.get("category", "")).lower()
+
+        if parent_name in FICTION_PARENTS:
+            return category == "genre"
+
+        if parent_name in {"children", "young adult"}:
+            return category in {"audience", "genre"}
+
+        return category in {"theme", "setting", "genre"}
+
+    def _is_domain_compatible(self, cluster: dict, parent_name: str) -> bool:
+        parent_domain = PARENT_DOMAIN_MAP.get(parent_name)
+        cluster_domains = self._extract_cluster_domains(cluster)
+        if parent_domain is None or not cluster_domains:
+            return True
+
+        incompatible = INCOMPATIBLE_DOMAINS.get(parent_domain, set())
+        if cluster_domains.intersection(incompatible):
+            return False
+
+        strong_domains = {"animals", "sports", "religion", "politics", "history", "science"}
+        strong_hits = cluster_domains.intersection(strong_domains)
+        if strong_hits and parent_domain in strong_domains and parent_domain not in strong_hits:
+            return False
+
+        if parent_domain == "religion" and "abstract" in cluster_domains:
+            return False
+
+        return True
+
+    def _best_and_second_score(self, scores: np.ndarray) -> tuple[int, float, float]:
+        if scores.size == 0:
+            return -1, 0.0, 0.0
+
+        order = np.argsort(scores)
+        best_idx = int(order[-1])
+        best_score = float(scores[best_idx])
+        second_score = float(scores[order[-2]]) if scores.size > 1 else 0.0
+        return best_idx, best_score, second_score
+
+    def _evaluate_assignment(
+        self,
+        cluster: dict,
+        member_embs: np.ndarray,
+        rep_emb: np.ndarray,
+        parent_embs: np.ndarray,
+    ) -> tuple[str | None, str | None]:
+        similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
+
+        rep_scores = cosine_similarity(rep_emb.reshape(1, -1), parent_embs).flatten()
+        best_idx, best_score, second_score = self._best_and_second_score(rep_scores)
+        if best_idx < 0:
+            return None, "low_confidence"
+
+        margin = best_score - second_score
+        if best_score < similarity_threshold or margin < margin_threshold:
+            return None, "low_confidence"
+
+        parent_name = self._parent_list[best_idx]
+
+        if not self._is_category_compatible(cluster, parent_name):
+            return None, "domain_mismatch"
+        if not self._is_domain_compatible(cluster, parent_name):
+            return None, "domain_mismatch"
+
+        member_scores = cosine_similarity(member_embs, parent_embs[best_idx].reshape(1, -1)).flatten()
+        avg_member_score = float(np.mean(member_scores))
+        if avg_member_score < consistency_threshold:
+            return None, "low_consistency"
+
+        return parent_name, None
+
     def _assign_parent(
         self, cluster: dict, tags: list[str], normed: np.ndarray, tag_to_idx: dict
     ) -> str | None:
@@ -326,14 +534,36 @@ class TaxonomyMerger:
 
         tag_to_idx = {t: i for i, t in enumerate(tags)}
         max_absorb = self.config.taxonomy_max_cluster_size_to_absorb
+        parent_embs = self._get_parent_embeddings()
 
         parent_clusters: dict[str, dict] = {}
         unmatched = []
 
         for cluster in classified_clusters:
-            parent_name = self._assign_parent(cluster, tags, normed, tag_to_idx)
+            member_indices = self._get_member_indices(cluster, tag_to_idx)
+            if not member_indices:
+                unmatched.append(cluster)
+                continue
+
+            member_embs = normed[member_indices]
+            rep_label = cluster.get("cluster_label", "")
+            rep_idx = tag_to_idx.get(rep_label)
+            rep_emb = normed[rep_idx] if rep_idx is not None else np.mean(member_embs, axis=0)
+
+            parent_name, reject_reason = self._evaluate_assignment(
+                cluster,
+                member_embs,
+                rep_emb,
+                parent_embs,
+            )
 
             if parent_name is None:
+                if reject_reason == "low_confidence":
+                    self.stats["rejected_low_confidence"] += 1
+                elif reject_reason == "low_consistency":
+                    self.stats["rejected_low_consistency"] += 1
+                elif reject_reason == "domain_mismatch":
+                    self.stats["rejected_domain_mismatch"] += 1
                 unmatched.append(cluster)
                 continue
 
@@ -349,7 +579,7 @@ class TaxonomyMerger:
                     self._absorb_into_parent(parent_clusters[parent_name], cluster)
                     self.stats["clusters_absorbed"] += 1
                 else:
-                    self._absorb_into_parent(parent_clusters[parent_name], cluster)
+                    unmatched.append(cluster)
 
         result = list(parent_clusters.values()) + unmatched
         result.sort(key=lambda c: len(c.get("members", [])), reverse=True)

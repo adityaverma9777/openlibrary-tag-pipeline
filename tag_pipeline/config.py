@@ -26,7 +26,13 @@ class PipelineConfig:
     min_cluster_size: int = 1
 
     enable_hierarchical_taxonomy_merge: bool = True
+    taxonomy_strict_mode: bool = True
     parent_genre_similarity_threshold: float = 0.40
+    parent_assignment_margin_threshold: float = 0.10
+    parent_semantic_consistency_threshold: float = 0.35
+    strict_parent_genre_similarity_threshold: float = 0.50
+    strict_parent_assignment_margin_threshold: float = 0.15
+    strict_parent_semantic_consistency_threshold: float = 0.45
     taxonomy_max_cluster_size_to_absorb: int = 5
 
     faiss_top_k: int = 10
