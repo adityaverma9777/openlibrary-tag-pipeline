@@ -23,16 +23,15 @@ class TagClusterer:
         norms[norms == 0] = 1.0
         normed = embeddings / norms
 
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            metric="cosine",
-            linkage="average",
-            distance_threshold=self.config.clustering_distance_threshold,
-        )
-        labels = clustering.fit_predict(normed)
+        labels = self._cluster_labels(normed)
 
         label_to_indices: dict[int, list[int]] = {}
+        noise_label_counter = max(int(np.max(labels)) + 1, 0) if len(labels) else 0
         for idx, label in enumerate(labels):
+            # Keep unresolved noise as singletons; do not collapse all -1 items together.
+            if label == -1:
+                label = noise_label_counter
+                noise_label_counter += 1
             label_to_indices.setdefault(label, []).append(idx)
 
         clusters = []
@@ -47,6 +46,76 @@ class TagClusterer:
         self.stats["clusters_after_merge"] = len(clusters)
 
         return clusters
+
+    def _cluster_labels(self, normed: np.ndarray) -> np.ndarray:
+        if self.config.use_hdbscan:
+            try:
+                import hdbscan
+
+                hdb = hdbscan.HDBSCAN(
+                    min_cluster_size=max(2, self.config.hdbscan_min_cluster_size),
+                    min_samples=max(1, self.config.hdbscan_min_samples),
+                    metric="euclidean",
+                    cluster_selection_method="eom",
+                )
+                labels = hdb.fit_predict(normed)
+
+                if self.config.hdbscan_reassign_noise:
+                    labels = self._reassign_noise_points(
+                        normed,
+                        labels,
+                        threshold=self.config.hdbscan_noise_reassign_similarity,
+                    )
+
+                # If HDBSCAN degenerates into all noise, fall back gracefully.
+                if np.all(labels == -1):
+                    return self._cluster_labels_agglomerative(normed)
+
+                return labels
+            except Exception:
+                return self._cluster_labels_agglomerative(normed)
+
+        return self._cluster_labels_agglomerative(normed)
+
+    def _cluster_labels_agglomerative(self, normed: np.ndarray) -> np.ndarray:
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            metric="cosine",
+            linkage="average",
+            distance_threshold=self.config.clustering_distance_threshold,
+        )
+        return clustering.fit_predict(normed)
+
+    def _reassign_noise_points(
+        self, normed: np.ndarray, labels: np.ndarray, threshold: float
+    ) -> np.ndarray:
+        if len(labels) == 0:
+            return labels
+
+        unique = [int(l) for l in np.unique(labels) if int(l) >= 0]
+        if not unique:
+            return labels
+
+        centroids = []
+        for label in unique:
+            idxs = np.where(labels == label)[0]
+            centroid = np.mean(normed[idxs], axis=0)
+            c_norm = np.linalg.norm(centroid)
+            if c_norm > 0:
+                centroid = centroid / c_norm
+            centroids.append(centroid)
+
+        centroids = np.array(centroids)
+        noise_idxs = np.where(labels == -1)[0]
+
+        for idx in noise_idxs:
+            sims = np.dot(centroids, normed[idx])
+            best_pos = int(np.argmax(sims))
+            best_sim = float(sims[best_pos])
+            if best_sim >= threshold:
+                labels[idx] = unique[best_pos]
+
+        return labels
 
     def category_merge(self, classified_clusters: list[dict], tags: list[str], embeddings: np.ndarray) -> list[dict]:
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)

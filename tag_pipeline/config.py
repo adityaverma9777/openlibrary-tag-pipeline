@@ -20,10 +20,15 @@ class PipelineConfig:
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_batch_size: int = 64
 
-    clustering_distance_threshold: float = 0.30
-    cluster_merge_threshold: float = 0.70
-    category_merge_threshold: float = 0.60
+    clustering_distance_threshold: float = 0.38
+    cluster_merge_threshold: float = 0.62
+    category_merge_threshold: float = 0.52
     min_cluster_size: int = 1
+    use_hdbscan: bool = True
+    hdbscan_min_cluster_size: int = 2
+    hdbscan_min_samples: int = 1
+    hdbscan_reassign_noise: bool = True
+    hdbscan_noise_reassign_similarity: float = 0.55
 
     enable_hierarchical_taxonomy_merge: bool = True
     taxonomy_strict_mode: bool = True
