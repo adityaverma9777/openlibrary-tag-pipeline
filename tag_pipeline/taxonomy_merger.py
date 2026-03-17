@@ -294,6 +294,15 @@ SUBGENRE_MAP = {
     "dinosaurs": "animals",
 }
 
+CLEAR_GENRE_PARENT_RULES = {
+    "romance": ["romance", "romantic", "rom-com", "romcom"],
+    "fantasy": ["fantasy", "grimdark", "magic", "wizard", "witch"],
+    "thriller": ["thriller", "suspense", "techno-thriller", "psychological thriller"],
+    "mystery": ["mystery", "whodunit", "detective", "crime fiction"],
+    "horror": ["horror", "slasher", "gothic", "haunting", "macabre"],
+    "science fiction": ["science fiction", "scifi", "sci fi", "sci-fi", "cyberpunk", "space opera"],
+}
+
 
 class TaxonomyMerger:
     def __init__(self, config: PipelineConfig, embedder):
@@ -301,6 +310,7 @@ class TaxonomyMerger:
         self.embedder = embedder
         self._parent_embeddings = None
         self._parent_list = list(PARENT_GENRES)
+        self._parent_aliases = self._build_parent_aliases()
         self.stats = {
             "clusters_before_taxonomy": 0,
             "clusters_after_taxonomy": 0,
@@ -312,6 +322,19 @@ class TaxonomyMerger:
             "rejected_low_consistency": 0,
             "rejected_domain_mismatch": 0,
         }
+
+    def _build_parent_aliases(self) -> dict[str, set[str]]:
+        aliases = {p: {p} for p in self._parent_list}
+        for child, parent in SUBGENRE_MAP.items():
+            if parent in aliases:
+                aliases[parent].add(child)
+
+        aliases.setdefault("science fiction", {"science fiction"}).update(
+            {"scifi", "sci fi", "sci-fi", "sf"}
+        )
+        aliases.setdefault("romance", {"romance"}).update({"romantic", "rom-com", "romcom"})
+        aliases.setdefault("thriller", {"thriller"}).update({"suspense", "techno-thriller"})
+        return aliases
 
     def _get_parent_embeddings(self) -> np.ndarray:
         if self._parent_embeddings is None:
@@ -467,6 +490,47 @@ class TaxonomyMerger:
         second_score = float(scores[order[-2]]) if scores.size > 1 else 0.0
         return best_idx, best_score, second_score
 
+    def _keyword_score(self, cluster: dict, parent_name: str) -> float:
+        aliases = self._parent_aliases.get(parent_name, {parent_name})
+        texts = [cluster.get("cluster_label", "")] + cluster.get("members", [])
+        if not texts:
+            return 0.0
+
+        score = 0.0
+        for text in texts:
+            text_lower = text.lower()
+            local = 0.0
+            for alias in aliases:
+                if text_lower == alias:
+                    local = max(local, 1.0)
+                elif alias in text_lower:
+                    local = max(local, 0.85)
+                elif text_lower in alias and len(text_lower) >= 4:
+                    local = max(local, 0.65)
+            score += local
+
+        return float(min(1.0, score / len(texts)))
+
+    def _detect_clear_genre_parent(self, cluster: dict) -> str | None:
+        texts = [cluster.get("cluster_label", "")] + cluster.get("members", [])
+        texts = [t.lower() for t in texts if t]
+        if not texts:
+            return None
+
+        for parent, keywords in CLEAR_GENRE_PARENT_RULES.items():
+            if all(any(keyword in text for keyword in keywords) for text in texts):
+                return parent
+
+        return None
+
+    def _strong_member_match(
+        self, member_embs: np.ndarray, parent_embs: np.ndarray
+    ) -> tuple[int, float]:
+        member_scores = cosine_similarity(member_embs, parent_embs)
+        max_by_parent = np.max(member_scores, axis=0)
+        best_parent_idx = int(np.argmax(max_by_parent))
+        return best_parent_idx, float(max_by_parent[best_parent_idx])
+
     def _evaluate_assignment(
         self,
         cluster: dict,
@@ -474,23 +538,73 @@ class TaxonomyMerger:
         rep_emb: np.ndarray,
         parent_embs: np.ndarray,
     ) -> tuple[str | None, str | None]:
+        clear_parent = self._detect_clear_genre_parent(cluster)
+        if clear_parent:
+            if not self._is_category_compatible(cluster, clear_parent):
+                return None, "domain_mismatch"
+            if not self._is_domain_compatible(cluster, clear_parent):
+                return None, "domain_mismatch"
+            return clear_parent, None
+
         similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
 
         rep_scores = cosine_similarity(rep_emb.reshape(1, -1), parent_embs).flatten()
-        best_idx, best_score, second_score = self._best_and_second_score(rep_scores)
+        keyword_scores = np.array([
+            self._keyword_score(cluster, parent_name) for parent_name in self._parent_list
+        ], dtype=np.float32)
+        hybrid_scores = (
+            self.config.parent_embedding_weight * rep_scores
+            + self.config.parent_keyword_weight * keyword_scores
+        )
+
+        best_idx, best_score, second_score = self._best_and_second_score(hybrid_scores)
         if best_idx < 0:
             return None, "low_confidence"
 
         margin = best_score - second_score
-        if best_score < similarity_threshold or margin < margin_threshold:
-            return None, "low_confidence"
-
         parent_name = self._parent_list[best_idx]
 
         if not self._is_category_compatible(cluster, parent_name):
             return None, "domain_mismatch"
         if not self._is_domain_compatible(cluster, parent_name):
             return None, "domain_mismatch"
+
+        parent_rep_sim = float(rep_scores[best_idx])
+        strong_keyword = float(keyword_scores[best_idx]) >= self.config.parent_keyword_strong_match_threshold
+
+        strong_parent_idx, strong_member_sim = self._strong_member_match(member_embs, parent_embs)
+        strong_member_for_best = (
+            strong_parent_idx == best_idx
+            and strong_member_sim >= self.config.parent_member_strong_match_threshold
+        )
+
+        strict_conf_ok = best_score >= similarity_threshold and margin >= margin_threshold
+        if not strict_conf_ok:
+            fallback_similarity = max(
+                0.0,
+                similarity_threshold - self.config.parent_fallback_similarity_delta,
+            )
+            fallback_margin = max(
+                0.0,
+                margin_threshold - self.config.parent_fallback_margin_delta,
+            )
+            if self.config.taxonomy_strict_mode:
+                fallback_similarity = max(
+                    0.0,
+                    fallback_similarity - self.config.strict_fallback_similarity_delta,
+                )
+                fallback_margin = max(
+                    0.0,
+                    fallback_margin - self.config.strict_fallback_margin_delta,
+                )
+
+            fallback_ok = (
+                (strong_keyword or strong_member_for_best)
+                and best_score >= fallback_similarity
+                and margin >= fallback_margin
+            )
+            if not fallback_ok:
+                return None, "low_confidence"
 
         member_scores = cosine_similarity(member_embs, parent_embs[best_idx].reshape(1, -1)).flatten()
         avg_member_score = float(np.mean(member_scores))
@@ -525,6 +639,11 @@ class TaxonomyMerger:
     ) -> list[dict]:
         if not self.config.enable_hierarchical_taxonomy_merge:
             return classified_clusters
+
+        self.stats["clusters_absorbed"] = 0
+        self.stats["rejected_low_confidence"] = 0
+        self.stats["rejected_low_consistency"] = 0
+        self.stats["rejected_domain_mismatch"] = 0
 
         self.stats["clusters_before_taxonomy"] = len(classified_clusters)
 
@@ -610,12 +729,27 @@ class TaxonomyMerger:
         normed = embeddings / norms
 
         tag_to_idx = {t: i for i, t in enumerate(tags)}
+        parent_embs = self._get_parent_embeddings()
 
         hierarchy: dict[str, list[str]] = {}
 
         for cluster in classified_clusters:
             rep = cluster.get("cluster_label", "")
-            parent_name = self._assign_parent(cluster, tags, normed, tag_to_idx)
+            member_indices = self._get_member_indices(cluster, tag_to_idx)
+            if not member_indices:
+                hierarchy.setdefault("other", []).append(rep)
+                continue
+
+            member_embs = normed[member_indices]
+            rep_idx = tag_to_idx.get(rep)
+            rep_emb = normed[rep_idx] if rep_idx is not None else np.mean(member_embs, axis=0)
+
+            parent_name, _ = self._evaluate_assignment(
+                cluster,
+                member_embs,
+                rep_emb,
+                parent_embs,
+            )
 
             if parent_name is None:
                 hierarchy.setdefault("other", []).append(rep)

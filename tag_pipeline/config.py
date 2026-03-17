@@ -27,12 +27,20 @@ class PipelineConfig:
 
     enable_hierarchical_taxonomy_merge: bool = True
     taxonomy_strict_mode: bool = True
-    parent_genre_similarity_threshold: float = 0.40
-    parent_assignment_margin_threshold: float = 0.10
-    parent_semantic_consistency_threshold: float = 0.35
-    strict_parent_genre_similarity_threshold: float = 0.50
-    strict_parent_assignment_margin_threshold: float = 0.15
-    strict_parent_semantic_consistency_threshold: float = 0.45
+    parent_genre_similarity_threshold: float = 0.45
+    parent_assignment_margin_threshold: float = 0.05
+    parent_semantic_consistency_threshold: float = 0.33
+    strict_parent_genre_similarity_threshold: float = 0.48
+    strict_parent_assignment_margin_threshold: float = 0.07
+    strict_parent_semantic_consistency_threshold: float = 0.38
+    parent_embedding_weight: float = 0.60
+    parent_keyword_weight: float = 0.40
+    parent_keyword_strong_match_threshold: float = 0.70
+    parent_member_strong_match_threshold: float = 0.58
+    parent_fallback_similarity_delta: float = 0.04
+    parent_fallback_margin_delta: float = 0.03
+    strict_fallback_similarity_delta: float = 0.02
+    strict_fallback_margin_delta: float = 0.02
     taxonomy_max_cluster_size_to_absorb: int = 5
 
     faiss_top_k: int = 10
