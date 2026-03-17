@@ -143,6 +143,7 @@ INCOMPATIBLE_DOMAINS = {
 
 LITERARY_CROSS_DOMAIN_ALLOWED = {
     ("science", "fiction"),
+    ("fiction", "science"),
     ("politics", "history"),
     ("history", "politics"),
     ("religion", "abstract"),
@@ -521,6 +522,7 @@ class TaxonomyMerger:
             return 0.0
 
         score = 0.0
+        max_local_score = 0.0
         for text in texts:
             text_lower = text.lower()
             local = 0.0
@@ -532,8 +534,11 @@ class TaxonomyMerger:
                 elif text_lower in alias and len(text_lower) >= 4:
                     local = max(local, 0.65)
             score += local
+            max_local_score = max(max_local_score, local)
 
-        return float(min(1.0, score / len(texts)))
+        avg_score = score / len(texts)
+        blended = 0.6 * avg_score + 0.4 * max_local_score
+        return float(min(1.0, blended))
 
     def _detect_clear_genre_parent(self, cluster: dict) -> str | None:
         texts = [cluster.get("cluster_label", "")] + cluster.get("members", [])
@@ -573,6 +578,8 @@ class TaxonomyMerger:
         similarity_threshold, margin_threshold, consistency_threshold = self._confidence_thresholds()
 
         rep_scores = cosine_similarity(rep_emb.reshape(1, -1), parent_embs).flatten()
+        member_avg_scores = np.mean(cosine_similarity(member_embs, parent_embs), axis=0)
+        embedding_scores = (0.5 * rep_scores) + (0.5 * member_avg_scores)
         keyword_scores = np.array([
             self._keyword_score(cluster, parent_name) for parent_name in self._parent_list
         ], dtype=np.float32)
@@ -580,7 +587,7 @@ class TaxonomyMerger:
             self._domain_compatibility_score(cluster, parent_name) for parent_name in self._parent_list
         ], dtype=np.float32)
         hybrid_scores = (
-            self.config.parent_embedding_weight * rep_scores
+            self.config.parent_embedding_weight * embedding_scores
             + self.config.parent_keyword_weight * keyword_scores
             + self.config.parent_domain_weight * domain_scores
         )
@@ -598,7 +605,7 @@ class TaxonomyMerger:
         margin = best_score - second_score
         parent_name = self._parent_list[best_idx]
 
-        parent_rep_sim = float(rep_scores[best_idx])
+        parent_rep_sim = float(embedding_scores[best_idx])
         strong_keyword = float(keyword_scores[best_idx]) >= self.config.parent_keyword_strong_match_threshold
         domain_score = float(domain_scores[best_idx])
 
@@ -633,6 +640,7 @@ class TaxonomyMerger:
         return parent_name, None, {
             "domain_soft_mismatch": domain_score < 1.0,
             "domain_score": domain_score,
+            "final_score": best_score,
         }
 
     def _assign_parent(
@@ -719,10 +727,14 @@ class TaxonomyMerger:
             else:
                 cluster_size = len(cluster.get("members", []))
                 rep = cluster.get("cluster_label", "").lower()
+                final_score = float(details.get("final_score", 0.0))
 
                 if rep == parent_name:
                     self._absorb_into_parent(parent_clusters[parent_name], cluster)
                 elif cluster_size <= max_absorb:
+                    self._absorb_into_parent(parent_clusters[parent_name], cluster)
+                    self.stats["clusters_absorbed"] += 1
+                elif final_score >= self.config.parent_large_cluster_merge_threshold:
                     self._absorb_into_parent(parent_clusters[parent_name], cluster)
                     self.stats["clusters_absorbed"] += 1
                 else:
